@@ -1,0 +1,20 @@
+[build-system]
+requires = ["setuptools>=77"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "ortak-agentic-os"
+version = "0.1.0"
+description = "A lean, model-agnostic runtime for goal-driven software agents"
+readme = "README.md"
+requires-python = ">=3.11"
+dependencies = [
+  "PyYAML>=6.0,<7",
+]
+
+[project.scripts]
+agentic = "agentic_os.cli:main"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+

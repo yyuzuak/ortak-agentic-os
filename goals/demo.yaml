@@ -1,0 +1,38 @@
+id: DEMO-001
+title: User profile walking skeleton
+objective: Create and verify a minimal user profile feature.
+status: approved
+
+tasks:
+  - id: TASK-001
+    objective: Define the profile contract.
+    produces:
+      - contracts/profile
+
+  - id: TASK-002
+    objective: Build the profile view against the approved contract.
+    depends_on:
+      - TASK-001
+
+  - id: TASK-003
+    objective: Verify the integrated profile feature.
+    depends_on:
+      - TASK-001
+      - TASK-002
+
+autonomy:
+  level: 3
+  allowed:
+    - inspect_repository
+    - modify_owned_paths
+    - run_tests
+    - create_checkpoint_commits
+  requires_approval:
+    - breaking_contract
+    - destructive_migration
+    - merge_main
+
+limits:
+  repair_attempts: 2
+  budget_usd: 1
+
