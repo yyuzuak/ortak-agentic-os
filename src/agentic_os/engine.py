@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import fnmatch
+import threading
 from pathlib import Path
 from typing import Any
 from uuid import uuid4
@@ -53,6 +54,55 @@ def run_mock_goal(goal: dict, state: StateStore) -> str:
         payload={"main_merge": "manual"},
     )
     return run_id
+
+
+class _LeaseHeartbeat:
+    """Keep a worktree lease alive for as long as this process is working.
+
+    A task may run far longer than the lease TTL, so renewing only at task
+    boundaries would let the lease expire mid-task and allow a second writer
+    into the same worktree. With a heartbeat the TTL measures process liveness
+    instead of task duration: if this process dies, renewals stop and the lease
+    expires on schedule.
+    """
+
+    def __init__(
+        self, state: StateStore, worktree_name: str, run_id: str, ttl_seconds: int
+    ):
+        self.state = state
+        self.worktree_name = worktree_name
+        self.run_id = run_id
+        self.ttl_seconds = ttl_seconds
+        self.interval = max(0.1, ttl_seconds / 3)
+        self._stop = threading.Event()
+        self._thread: threading.Thread | None = None
+
+    def __enter__(self) -> _LeaseHeartbeat:
+        self._thread = threading.Thread(
+            target=self._renew_until_stopped,
+            name=f"lease-heartbeat-{self.worktree_name}",
+            daemon=True,
+        )
+        self._thread.start()
+        return self
+
+    def _renew_until_stopped(self) -> None:
+        while not self._stop.wait(self.interval):
+            try:
+                self.state.renew_lease(
+                    self.worktree_name, self.run_id, ttl_seconds=self.ttl_seconds
+                )
+            except Exception:
+                # The lease is gone. Stop renewing; the synchronous renewal at
+                # the next task boundary raises the same failure on the main
+                # thread, where the run can be failed properly.
+                return
+
+    def __exit__(self, exc_type: Any, exc: Any, traceback: Any) -> bool:
+        self._stop.set()
+        if self._thread is not None:
+            self._thread.join(timeout=self.interval + 5)
+        return False
 
 
 class GoalRunner:
@@ -169,28 +219,31 @@ class GoalRunner:
         self.state.update_worktree(worktree["name"], status="RUNNING", mode="goal")
 
         try:
-            for task_row in self.state.list_tasks(run_id):
-                if task_row["status"] == "COMPLETED":
-                    continue
-                control = self._run(run_id)["status"]
-                if control == "PAUSE_REQUESTED":
-                    return self._pause(run_id, goal_record, worktree, "user requested pause")
-                if control == "STOP_REQUESTED":
-                    return self._stop(run_id, goal_record, worktree)
-                self._assert_dependencies_completed(run_id, task_row)
-                self.state.renew_lease(
-                    worktree["name"], run_id, ttl_seconds=lease_ttl
-                )
-                self._execute_task(
-                    run_id=run_id,
-                    goal_record=goal_record,
-                    goal=goal,
-                    task_row=task_row,
-                    worktree=worktree,
-                    worktree_path=worktree_path,
-                    provider=provider,
-                    repair_limit=repair_limit,
-                )
+            with _LeaseHeartbeat(self.state, worktree["name"], run_id, lease_ttl):
+                for task_row in self.state.list_tasks(run_id):
+                    if task_row["status"] == "COMPLETED":
+                        continue
+                    control = self._run(run_id)["status"]
+                    if control == "PAUSE_REQUESTED":
+                        return self._pause(
+                            run_id, goal_record, worktree, "user requested pause"
+                        )
+                    if control == "STOP_REQUESTED":
+                        return self._stop(run_id, goal_record, worktree)
+                    self._assert_dependencies_completed(run_id, task_row)
+                    self.state.renew_lease(
+                        worktree["name"], run_id, ttl_seconds=lease_ttl
+                    )
+                    self._execute_task(
+                        run_id=run_id,
+                        goal_record=goal_record,
+                        goal=goal,
+                        task_row=task_row,
+                        worktree=worktree,
+                        worktree_path=worktree_path,
+                        provider=provider,
+                        repair_limit=repair_limit,
+                    )
 
             head = self.git.head(worktree_path)
             self.state.set_current_task(run_id, None)

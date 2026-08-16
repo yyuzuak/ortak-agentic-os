@@ -25,6 +25,8 @@ limits:
 loops:
   default:
     repair_attempts: 3
+    # Liveness window, not task duration: a running process renews the lease
+    # continuously, so this only bounds how long a dead process holds it.
     lease_ttl_seconds: 300
 
 skills:

@@ -186,6 +186,88 @@ class WorkflowTests(unittest.TestCase):
                 "second", "RUN-2", ttl_seconds=60, max_parallel=1
             )
 
+    def slow_goal(self, goal_id: str, delay_seconds: float) -> dict:
+        return {
+            "id": goal_id,
+            "objective": "Work for longer than the lease TTL",
+            "loop": {"lease_ttl_seconds": 2, "repair_attempts": 0},
+            "tasks": [
+                {
+                    "id": "TASK-SLOW",
+                    "objective": "Outlive the lease TTL",
+                    "mock_delay_seconds": delay_seconds,
+                },
+                # A second task is required to reach the boundary renewal that
+                # fails with "Lease lost" once the lease has expired mid-task.
+                {
+                    "id": "TASK-NEXT",
+                    "objective": "Continue after the slow task",
+                    "depends_on": ["TASK-SLOW"],
+                },
+            ],
+        }
+
+    def start_goal_in_thread(
+        self, record: dict, worktree_name: str, errors: list[Exception]
+    ) -> threading.Thread:
+        """Start a run in the background and wait until it holds the lease."""
+
+        def execute() -> None:
+            try:
+                GoalRunner(
+                    root=self.root,
+                    config=self.config,
+                    state=self.state,
+                    git=self.git,
+                ).start(record)
+            except Exception as exc:  # pragma: no cover - assertion records it
+                errors.append(exc)
+
+        thread = threading.Thread(target=execute)
+        thread.start()
+        deadline = time.monotonic() + 2
+        while time.monotonic() < deadline:
+            if self.state.get_lease(worktree_name):
+                break
+            time.sleep(0.01)
+        return thread
+
+    def test_competing_writer_cannot_steal_lease_during_long_task(self) -> None:
+        self.create_managed_worktree("guarded")
+        record = self.approve_and_arm(self.slow_goal("GOAL-GUARDED", 4.0), "guarded")
+        errors: list[Exception] = []
+        thread = self.start_goal_in_thread(record, "guarded", errors)
+        # Stay inside the still-running task, but past the original TTL.
+        time.sleep(2.6)
+
+        with self.assertRaisesRegex(RuntimeError, "leased by"):
+            self.state.acquire_lease("guarded", "RUN-OTHER", ttl_seconds=60)
+
+        thread.join(timeout=15)
+        self.assertFalse(thread.is_alive())
+        self.assertEqual(errors, [])
+        self.assertEqual(
+            self.state.get_goal("GOAL-GUARDED")["status"], "READY_FOR_INTEGRATION"
+        )
+        self.assertIsNone(self.state.get_lease("guarded"))
+
+    def test_recover_does_not_reclaim_the_lease_of_a_live_run(self) -> None:
+        self.create_managed_worktree("live")
+        record = self.approve_and_arm(self.slow_goal("GOAL-LIVE", 4.0), "live")
+        errors: list[Exception] = []
+        thread = self.start_goal_in_thread(record, "live", errors)
+        # A concurrent `agentic recover` while the task is still working.
+        time.sleep(2.6)
+
+        self.assertEqual(self.state.release_expired_leases(), [])
+
+        thread.join(timeout=15)
+        self.assertFalse(thread.is_alive())
+        self.assertEqual(errors, [])
+        self.assertEqual(
+            self.state.get_goal("GOAL-LIVE")["status"], "READY_FOR_INTEGRATION"
+        )
+
     def test_two_worktrees_can_run_concurrently_within_limit(self) -> None:
         self.config["limits"]["parallel_agents"] = 2
         records = []
