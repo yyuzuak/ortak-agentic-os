@@ -3,6 +3,7 @@ version: 0
 runtime:
   state: .agentic/state.sqlite
   worktrees: .agentic/worktrees
+  integrations: .agentic/integrations
 
 models:
   default:
@@ -21,3 +22,15 @@ limits:
   repair_attempts: 3
   budget_usd: 10
 
+loops:
+  default:
+    repair_attempts: 3
+    lease_ttl_seconds: 300
+
+skills:
+  checkpoint-discipline: >-
+    Make one coherent change per task, run its checks, and leave the worktree
+    ready for a checkpoint commit. Never merge or modify another worktree.
+
+verification:
+  commands: []

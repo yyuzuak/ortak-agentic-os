@@ -19,8 +19,10 @@ This repository is a minimal, model-agnostic runtime for goal-driven software ag
 
 - Install/sync: `uv sync`
 - Health check: `uv run agentic doctor`
-- Validate demo goal: `uv run agentic goal validate goals/demo.yaml`
-- Run the mock demo: `uv run agentic demo`
-- Inspect runtime state: `uv run agentic status`
+- Create an isolated branch: `uv run agentic worktree create NAME --branch task/NAME --model default`
+- Open controlled interaction: `uv run agentic chat NAME`
+- Inspect shared context: `uv run agentic context NAME`
+- Validate/approve/arm/run: validate a goal, then use the explicit goal lifecycle commands
+- Verify new heads once: `uv run agentic watch --once`
+- Inspect runtime state: `uv run agentic status` or `uv run agentic events`
 - Tests: `uv run python -m unittest discover -s tests -v`
-

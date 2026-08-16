@@ -2,23 +2,35 @@ id: DEMO-001
 title: User profile walking skeleton
 objective: Create and verify a minimal user profile feature.
 status: approved
+loop: default
+skills:
+  - checkpoint-discipline
 
 tasks:
   - id: TASK-001
     objective: Define the profile contract.
     produces:
       - contracts/profile
+    output: agentic-demo/profile-contract.txt
+    owned_paths:
+      - agentic-demo/**
 
   - id: TASK-002
     objective: Build the profile view against the approved contract.
     depends_on:
       - TASK-001
+    output: agentic-demo/profile-view.txt
+    owned_paths:
+      - agentic-demo/**
 
   - id: TASK-003
     objective: Verify the integrated profile feature.
     depends_on:
       - TASK-001
       - TASK-002
+    output: agentic-demo/profile-verification.txt
+    owned_paths:
+      - agentic-demo/**
 
 autonomy:
   level: 3
@@ -35,4 +47,3 @@ autonomy:
 limits:
   repair_attempts: 2
   budget_usd: 1
-

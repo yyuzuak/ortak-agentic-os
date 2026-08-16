@@ -1,56 +1,122 @@
 # Ortak Agentic OS
 
-A minimal template for controlled, goal-driven, multi-model software development.
+Farklı kod ajanlarını izole Git worktree'lerinde, insan denetimli hedefler ve
+ortak durum üzerinden çalıştırmak için yalın bir şablon repo.
 
-The user chooses a worktree and model, collaborates interactively with the agent, approves a versioned goal, and only then starts an autonomous loop. Runtime coordination is kept in one ignored SQLite database instead of a directory full of status and message files.
+V0.4 ham yapı tamamlandı. Kullanıcı worktree ve model profilini seçer, ajanla
+etkileşimli olarak planı olgunlaştırır, hedefi onaylayıp kilitler ve ancak ayrı
+bir komutla otonom döngüyü başlatır. Geçici koordinasyon dosya yığını yerine
+Git commit'leri ve ignore edilen tek `.agentic/state.sqlite` veritabanı kullanılır.
 
-## V0 principles
-
-- Human-controlled transition from interactive work to autonomy
-- Model-independent goals and runtime protocols
-- Commit and event based coordination
-- One active writer per worktree
-- Manual merge to `main`
-- Event-driven verification
-- Small tracked surface: instructions, one config, and goals
-
-## Quick start
+## Kurulum ve ilk akış
 
 ```bash
 uv sync
 uv run agentic doctor
+
+# Kullanıcı worktree/model seçimini yapar.
+uv run agentic worktree create ui --branch task/ui --model default
+
+# Etkileşimli görüşme; bu aşamada otonomi kapalıdır.
+uv run agentic chat ui
+uv run agentic context ui
+
+# Görüşmede netleşen hedefi kullanıcı açıkça devreye alır.
 uv run agentic goal validate goals/demo.yaml
-uv run agentic demo
-uv run agentic status
+uv run agentic goal approve goals/demo.yaml --worktree ui
+uv run agentic goal arm DEMO-001
+uv run agentic goal run DEMO-001
+
+# Test ajanı yeni commit'i yalnızca bir kez doğrular.
+uv run agentic watch --once
+
+# main'e değil, incelemeye hazır ayrı bir integration branch'ine birleştirir.
+uv run agentic goal integrate DEMO-001 --branch integration/sprint-1
+
+# Aynı sprintteki diğer goal'lar aynı branch adıyla aynı integration
+# worktree'sine sırayla alınır.
+uv run agentic goal integrate OTHER-001 --branch integration/sprint-1
 ```
 
-Run the tests:
+`main` dalına son birleşim bilinçli olarak kullanıcıya bırakılır.
+
+## Sürüm katmanları
+
+| Katman | Hazır yetenekler |
+|---|---|
+| V0.1 | Worktree oluşturma/inceleme/kaldırma, seçilen model profili, tek-yazar lease'i |
+| V0.2 | Doğrulanan ve sürümlenen goal; `approve -> arm -> run`; task bağımlılıkları; pause/resume/stop |
+| V0.3 | Mock ve genel CLI provider'ı; skills ve loop profilleri; implement-review-test-repair; checkpoint commit'leri |
+| V0.4 | Ajanlar arası context görünürlüğü; commit-başına arka plan doğrulama; bütçe kapısı; recovery; güvenli integration branch'i |
+
+Bu katmanlar ayrı ürünler değil, aynı küçük runtime'ın bugünkü V0.4 kapsamına
+kadar tamamlanan evrimidir.
+
+## Model bağlama
+
+Runtime model markasına bağlı değildir. `mock` testler içindir. Gerçek bir ajan
+CLI'ı `command` provider ile bağlanır; görev paketi JSON olarak stdin'den gelir
+ve komut atanmış worktree içinde çalışır:
+
+```yaml
+models:
+  coder:
+    provider: command
+    model: your-model-id
+    command: ["your-agent", "run", "--stdin-json"]
+    interactive_command: ["your-agent"]
+```
+
+Claude, Codex, GLM, DeepSeek veya başka bir aracın güncel CLI argümanları bu
+profile yazılır; goal, loop ve koordinasyon protokolü değişmez. `skills` ve
+`loops` küçük sistemlerde doğrudan `agentic.yaml` içinde tutulabilir.
+
+## Kontrol ve güvenlik sınırları
+
+- Worktree ve model seçimini kullanıcı yapar.
+- `chat` yalnızca etkileşimli oturum açar; otonom çalışmayı başlatmaz.
+- Onaylanan goal içeriği digest ve sürümle dondurulur.
+- Bir worktree'de aynı anda yalnızca bir yazıcı lease alabilir.
+- Task ancak review ve kontroller geçince checkpoint commit'i olur.
+- Onarım denemesi veya bütçe sınırı aşılırsa çalışma durur.
+- Pause/stop istekleri güvenli task sınırlarında uygulanır.
+- Ajanlar `context` ile diğer worktree'lerin dal, model, durum ve head bilgisini görür.
+- Aynı canlı koordinasyon özeti her otonom task paketine otomatik eklenir.
+- `parallel_agents` aynı anda alınabilecek global yazıcı lease sayısını sınırlar;
+  kapasite doluysa goal güvenli biçimde pause olur ve daha sonra resume edilebilir.
+- Watcher aynı commit'i tekrar test etmez ve kod yazmaz.
+- Bir sprintin feature dalları aynı integration worktree'sine ardışık alınabilir.
+- Merge conflict veya birleşik test hatası goal'ı durdurur; runtime doğrudan `main`e yazmaz.
+- Provider'ın branch değiştirmesi veya runtime dışında commit üretmesi algılanıp goal bloke edilir.
+- Kirli worktree sessizce silinmez; dal kaldırma sonrasında korunur.
+
+## Doğrulama ve işletim
 
 ```bash
-uv run python -m unittest discover -s tests -v
+uv run python -W error::ResourceWarning -m unittest discover -s tests -v
+uv run agentic events
+uv run agentic recover
 ```
 
-## Current V0 skeleton
+`watch --duration 3600 --interval 30` hafif bir test ajanını belirli süre
+çalıştırır. Yarım kalan süreçlerin lease süresi dolduğunda `recover`, koşuyu
+devam ettirilebilir `PAUSED` durumuna taşır.
 
-The initial executable skeleton provides:
-
-- YAML configuration and goal loading
-- Goal validation, dependency validation, and cycle detection
-- SQLite-backed runs and append-only events
-- A deterministic mock execution loop
-- Health and status commands
-
-The mock loop intentionally does not call a model or modify application source. Provider adapters, real worktree execution, leases, and integration gates are the next implementation slices.
-
-## Repository surface
+## Repo yüzeyi
 
 ```text
-AGENTS.md          shared agent rules
-CLAUDE.md          Claude adapter importing AGENTS.md
-agentic.yaml       project configuration
-goals/             versioned goals
-.agentic/          ignored SQLite runtime and worktrees
-src/agentic_os/    CLI/runtime package
-tests/             deterministic core tests
+AGENTS.md          ortak ve model-bağımsız çalışma kuralları
+CLAUDE.md          aynı kuralları Claude uyumlu biçimde içeri alır
+agentic.yaml       runtime, model, loop, skill ve doğrulama ayarları
+goals/             sürümlenecek hedef tanımları
+.agentic/          ignore edilen SQLite, worktree ve integration çalışma alanı
+src/agentic_os/    küçük CLI/runtime paketi
+tests/             deterministik ve gerçek Git uçtan uca testleri
 ```
 
+## Bilinçli V0 sınırları
+
+Runtime şu an yereldir; bulut scheduler'ı, web paneli veya dağıtık mesaj kuyruğu
+yoktur. Gerçek model CLI komutları kullanıcı ortamına göre profile eklenir.
+Watcher deterministik kontrolleri yürütür fakat çalışan ajanın dalına kod yazıp
+commit atmaz; düzeltme, ilgili goal'ın kontrollü repair döngüsünde yapılır.
