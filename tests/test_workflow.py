@@ -396,6 +396,31 @@ class WorkflowTests(unittest.TestCase):
         self.assertEqual(first[0].status, "PASSED")
         self.assertEqual(second, [])
 
+    def test_background_watcher_observes_new_commits_during_window(self) -> None:
+        worktree = self.create_managed_worktree("watched")
+        path = Path(worktree["path"])
+        watcher = VerificationWatcher(config=self.config, state=self.state, git=self.git)
+        results = []
+        thread = threading.Thread(
+            target=lambda: results.extend(watcher.run_for(0.4, 0.03))
+        )
+        thread.start()
+        deadline = time.monotonic() + 1
+        while time.monotonic() < deadline:
+            if self.state.get_verification("watched", self.git.head(path)):
+                break
+            time.sleep(0.01)
+        first_head = self.git.head(path)
+        (path / "published.txt").write_text("new head\n", encoding="utf-8")
+        second_head, _ = self.git.commit_checkpoint(path, "fixture: publish new head")
+        thread.join(timeout=2)
+
+        self.assertFalse(thread.is_alive())
+        self.assertNotEqual(first_head, second_head)
+        self.assertEqual(
+            {result.head_sha for result in results}, {first_head, second_head}
+        )
+
     def test_command_provider_receives_resolved_skills(self) -> None:
         worktree = self.create_managed_worktree("command")
         sibling = self.create_managed_worktree("sibling")
