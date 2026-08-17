@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import sys
 import tempfile
 import threading
@@ -543,6 +544,54 @@ class WorkflowTests(unittest.TestCase):
         self.assertIn("Only make the requested focused change.", prompt)
         self.assertIn(sibling["branch"], prompt)
         self.assertIn("coordination_context", prompt)
+
+    def test_repair_attempt_receives_the_previous_failure(self) -> None:
+        worktree = self.create_managed_worktree("repair")
+        self.config["models"]["failing-once"] = {
+            "provider": "command",
+            "model": "fixture",
+            "command": [
+                sys.executable,
+                "-c",
+                "import json,pathlib,sys\n"
+                "payload = sys.stdin.read()\n"
+                "attempt = json.loads(payload)['attempt']\n"
+                "pathlib.Path('generated').mkdir(exist_ok=True)\n"
+                "pathlib.Path('generated/prompt-%d.json' % attempt).write_text(payload)\n"
+                "if attempt == 1:\n"
+                "    sys.stderr.write('boom: contract check failed\\n')\n"
+                "    sys.exit(1)\n",
+            ],
+        }
+        self.state.update_worktree("repair", model="failing-once")
+        goal = {
+            "id": "GOAL-REPAIR",
+            "objective": "Feed the failure back into the repair attempt",
+            "tasks": [
+                {
+                    "id": "TASK-1",
+                    "objective": "Fail once, then succeed",
+                    "owned_paths": ["generated/**"],
+                }
+            ],
+        }
+        record = self.approve_and_arm(goal, "repair")
+
+        GoalRunner(
+            root=self.root, config=self.config, state=self.state, git=self.git
+        ).start(record)
+
+        generated = Path(worktree["path"]) / "generated"
+        first = json.loads((generated / "prompt-1.json").read_text(encoding="utf-8"))
+        second = json.loads((generated / "prompt-2.json").read_text(encoding="utf-8"))
+
+        self.assertNotIn("previous_attempt", first["task"])
+        previous = second["task"]["previous_attempt"]
+        self.assertEqual(previous["attempt"], 1)
+        self.assertIn("boom: contract check failed", previous["error"])
+        self.assertEqual(
+            self.state.get_goal("GOAL-REPAIR")["status"], "READY_FOR_INTEGRATION"
+        )
 
     def test_provider_commit_is_detected_and_blocks_goal(self) -> None:
         worktree = self.create_managed_worktree("rogue")

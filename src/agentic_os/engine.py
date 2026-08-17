@@ -322,6 +322,15 @@ class GoalRunner:
         last_error: Exception | None = None
         for attempt in range(start_attempt, max_attempts + 1):
             self.state.update_task(run_id, task_id, status="RUNNING", attempts=attempt)
+            if last_error is not None:
+                # A repair attempt is only a repair if the provider is told what
+                # went wrong; a bare attempt counter just buys the same mistake
+                # again. Check failures carry the failing command and its stderr.
+                provider_task["previous_attempt"] = {
+                    "attempt": attempt - 1,
+                    "kind": type(last_error).__name__,
+                    "error": str(last_error),
+                }
             try:
                 head_before_provider = self.git.head(worktree_path)
                 branch_before_provider = self.git.branch(worktree_path)

@@ -90,6 +90,15 @@ Claude, Codex, GLM, DeepSeek veya başka bir aracın güncel CLI argümanları b
 profile yazılır; goal, loop ve koordinasyon protokolü değişmez. `skills` ve
 `loops` küçük sistemlerde doğrudan `agentic.yaml` içinde tutulabilir.
 
+`agentic doctor` her `command` profilinin çalıştırılabilirini PATH üzerinde
+çözer ve bulamazsa `FAIL` verip 1 ile çıkar; yani yanlış yazılmış bir komut
+adını ilk goal koşusunda değil, kurulum anında görürsün.
+
+Bir task başarısız olduğunda sonraki deneme, provider paketinde
+`previous_attempt` alanıyla gelir: önceki hatanın türü ve mesajı (kontrol
+komutu başarısızsa komutun kendisi ve stderr'i) içeride olur. Repair döngüsü
+böylece aynı hatayı tekrarlamak yerine gerçekten onarabilir.
+
 ## Kontrol ve güvenlik sınırları
 
 - Worktree ve model seçimini kullanıcı yapar.

@@ -169,23 +169,63 @@ def project_context() -> tuple[Path, dict, StateStore, GitOperations]:
     return root, config, StateStore(state_path), GitOperations(root, worktree_root)
 
 
+def _model_checks(config: dict) -> list[tuple[str, str, str]]:
+    """Report every model profile, resolving the binaries command profiles need."""
+    checks: list[tuple[str, str, str]] = []
+    models = config["models"]
+    if not isinstance(models.get("default"), dict):
+        checks.append(
+            (
+                "default model profile",
+                "missing; pass --model explicitly to worktree create",
+                "WARN",
+            )
+        )
+    provider_defaults = config.get("providers", {})
+    for name, profile in sorted(models.items()):
+        provider = profile.get("provider")
+        if provider != "command":
+            checks.append(
+                (f"model {name}", f"{provider}: {profile.get('model', '-')}", "OK")
+            )
+            continue
+        defaults = provider_defaults.get("command", {})
+        for key in ("command", "interactive_command"):
+            command = profile.get(key, defaults.get(key) if key == "command" else None)
+            if not command:
+                continue
+            resolved = shutil.which(command[0])
+            checks.append(
+                (
+                    f"model {name} {key}",
+                    resolved or f"{command[0]}: not found on PATH",
+                    "OK" if resolved else "FAIL",
+                )
+            )
+    return checks
+
+
 def command_doctor(_: argparse.Namespace) -> int:
     root, config, state, git = project_context()
     git.ensure_repository()
-    checks = [
-        ("project root", str(root)),
-        ("configuration", "valid"),
-        ("git", shutil.which("git") or "missing"),
-        ("git head", git.head()),
-        ("runtime database", str(state.path)),
-        ("default provider", config["models"]["default"]["provider"]),
-        ("main merge", config["autonomy"]["main_merge"]),
+    git_path = shutil.which("git")
+    try:
+        head = (git.head(), "OK")
+    except GitError:
+        # A freshly initialized repository has no HEAD yet; worktrees need one.
+        head = ("no commits yet; commit before creating a worktree", "WARN")
+    checks: list[tuple[str, str, str]] = [
+        ("project root", str(root), "OK"),
+        ("configuration", "valid", "OK"),
+        ("git", git_path or "not found on PATH", "OK" if git_path else "FAIL"),
+        ("git head", *head),
+        ("runtime database", str(state.path), "OK"),
+        ("main merge", config["autonomy"]["main_merge"], "OK"),
+        *_model_checks(config),
     ]
-    git_ok = shutil.which("git") is not None
-    for label, value in checks:
-        marker = "OK" if value != "missing" else "FAIL"
+    for label, value, marker in checks:
         print(f"[{marker}] {label}: {value}")
-    return 0 if git_ok else 1
+    return 1 if any(marker == "FAIL" for _, _, marker in checks) else 0
 
 
 def command_worktree_create(args: argparse.Namespace) -> int:

@@ -187,6 +187,63 @@ tasks:
                 self.output(["git", "status", "--porcelain"], root), ""
             )
 
+    def test_doctor_resolves_command_provider_binaries(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            self.run_cmd(["git", "init", "-b", "main"], root)
+            self.run_cmd(["git", "config", "user.name", "Agentic Test"], root)
+            self.run_cmd(["git", "config", "user.email", "agentic@example.test"], root)
+            self.cli(["init"], root)
+
+            # A repository with no commits is reported, not crashed on.
+            fresh = self.cli(["doctor"], root)
+            self.assertIn("[WARN] git head: no commits yet", fresh)
+
+            self.run_cmd(["git", "add", "-A"], root)
+            self.run_cmd(["git", "commit", "-m", "scaffold"], root)
+            config = root / "agentic.yaml"
+            base = config.read_text(encoding="utf-8")
+
+            # A command profile whose binary does not exist must fail loudly,
+            # and a missing `default` profile is only a warning.
+            config.write_text(
+                base.replace(
+                    "  default:\n    provider: mock\n    model: deterministic-worker\n",
+                    "  coder:\n"
+                    "    provider: command\n"
+                    "    model: fixture\n"
+                    '    command: ["definitely-not-installed-agent", "run"]\n',
+                ),
+                encoding="utf-8",
+            )
+            result = subprocess.run(
+                [sys.executable, "-m", "agentic_os", "doctor"],
+                cwd=root,
+                text=True,
+                capture_output=True,
+                check=False,
+            )
+            self.assertEqual(result.returncode, 1)
+            self.assertIn("[FAIL] model coder command", result.stdout)
+            self.assertIn("not found on PATH", result.stdout)
+            self.assertIn("[WARN] default model profile", result.stdout)
+
+            # A command profile pointing at a real binary passes.
+            config.write_text(
+                base.replace(
+                    "  default:\n    provider: mock\n    model: deterministic-worker\n",
+                    "  default:\n"
+                    "    provider: command\n"
+                    "    model: fixture\n"
+                    f'    command: ["{sys.executable}", "-c", "pass"]\n',
+                ),
+                encoding="utf-8",
+            )
+            healthy = self.cli(["doctor"], root)
+            self.assertIn("[OK] model default command", healthy)
+            self.assertNotIn("[FAIL]", healthy)
+            self.assertNotIn("[WARN]", healthy)
+
     def test_init_refuses_outside_a_repository_root(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
