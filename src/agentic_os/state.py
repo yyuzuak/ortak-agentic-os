@@ -33,7 +33,15 @@ class StateStore:
             self.path, timeout=30.0, factory=ClosingConnection
         )
         connection.row_factory = sqlite3.Row
+        # busy_timeout first: the journal_mode switch needs a brief exclusive
+        # lock, and every other process may already be reading.
         connection.execute("PRAGMA busy_timeout = 30000")
+        # Several processes share this database - a goal run per worktree, chat
+        # sessions, the watcher. Under WAL a writer no longer blocks readers,
+        # so `agentic status` and `events` stay responsive during a run. This
+        # is a no-op once the database file is already in WAL mode, and it
+        # migrates databases created before WAL was adopted.
+        connection.execute("PRAGMA journal_mode = WAL")
         connection.execute("PRAGMA foreign_keys = ON")
         return connection
 
