@@ -140,6 +140,73 @@ tasks:
             self.cli(["worktree", "remove", "parallel", "--yes"], root)
             self.assertEqual(self.output(["git", "status", "--porcelain"], root), "")
 
+    def test_init_scaffolds_a_usable_project(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            self.run_cmd(["git", "init", "-b", "main"], root)
+            self.run_cmd(["git", "config", "user.name", "Agentic Test"], root)
+            self.run_cmd(["git", "config", "user.email", "agentic@example.test"], root)
+            (root / "README.md").write_text("# Consumer project\n", encoding="utf-8")
+            (root / ".gitignore").write_text(".venv/\n", encoding="utf-8")
+            self.run_cmd(["git", "add", "-A"], root)
+            self.run_cmd(["git", "commit", "-m", "existing project"], root)
+
+            scaffolded = self.cli(["init"], root)
+            self.assertIn("created: agentic.yaml", scaffolded)
+            self.assertIn("created: goals/example.yaml", scaffolded)
+
+            # An existing .gitignore is appended to, never replaced.
+            ignore = (root / ".gitignore").read_text(encoding="utf-8")
+            self.assertIn(".venv/", ignore)
+            self.assertIn(".agentic/", ignore)
+
+            # The scaffold is immediately usable end to end.
+            self.cli(["doctor"], root)
+            self.assertIn(
+                "Goal is valid: EXAMPLE-001",
+                self.cli(["goal", "validate", "goals/example.yaml"], root),
+            )
+            self.run_cmd(["git", "add", "-A"], root)
+            self.run_cmd(["git", "commit", "-m", "agentic scaffold"], root)
+            self.cli(
+                ["worktree", "create", "ui", "--branch", "task/ui", "--model", "default"],
+                root,
+            )
+            self.cli(["goal", "approve", "goals/example.yaml", "--worktree", "ui"], root)
+            self.cli(["goal", "arm", "EXAMPLE-001"], root)
+            self.assertIn(
+                "Status: READY_FOR_INTEGRATION",
+                self.cli(["goal", "run", "EXAMPLE-001"], root),
+            )
+
+            # Re-running is safe and does not clobber existing files.
+            again = self.cli(["init"], root)
+            self.assertIn("Already initialized", again)
+            self.assertIn("kept: agentic.yaml", again)
+            self.assertEqual(
+                self.output(["git", "status", "--porcelain"], root), ""
+            )
+
+    def test_init_refuses_outside_a_repository_root(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            self.run_cmd(["git", "init", "-b", "main"], root)
+            nested = root / "packages" / "app"
+            nested.mkdir(parents=True)
+
+            result = subprocess.run(
+                [sys.executable, "-m", "agentic_os", "init"],
+                cwd=nested,
+                text=True,
+                capture_output=True,
+                check=False,
+            )
+
+            self.assertEqual(result.returncode, 1)
+            self.assertIn("Git repository root", result.stderr)
+            self.assertFalse((nested / "agentic.yaml").exists())
+            self.assertFalse((root / "agentic.yaml").exists())
+
     def cli(self, args: list[str], cwd: Path) -> str:
         return self.output([sys.executable, "-m", "agentic_os", *args], cwd)
 

@@ -21,6 +21,137 @@ from agentic_os.state import StateStore
 from agentic_os.watcher import VerificationWatcher
 
 
+SCAFFOLD_CONFIG = """version: 0
+
+runtime:
+  state: .agentic/state.sqlite
+  worktrees: .agentic/worktrees
+  integrations: .agentic/integrations
+
+models:
+  # `default` is the profile `doctor` reports and the one `worktree create`
+  # uses unless you pass --model. `mock` is deterministic and offline.
+  default:
+    provider: mock
+    model: deterministic-worker
+  # Bind a real agent CLI with a command profile. The task packet arrives as
+  # JSON on stdin and the command runs inside the assigned worktree.
+  # coder:
+  #   provider: command
+  #   model: your-model-id
+  #   command: ["your-agent", "run", "--stdin-json"]
+  #   interactive_command: ["your-agent"]
+
+autonomy:
+  default_level: 3
+  main_merge: manual
+
+limits:
+  parallel_agents: 2
+  repair_attempts: 3
+  budget_usd: 10
+
+loops:
+  default:
+    repair_attempts: 3
+    # Liveness window, not task duration: a running process renews the lease
+    # continuously, so this only bounds how long a dead process holds it.
+    lease_ttl_seconds: 300
+
+skills:
+  checkpoint-discipline: >-
+    Make one coherent change per task, run its checks, and leave the worktree
+    ready for a checkpoint commit. Never merge or modify another worktree.
+
+# Commands run against every new worktree head by `agentic watch`, and again
+# in the integration worktree before a goal is marked INTEGRATED.
+verification:
+  commands: []
+"""
+
+SCAFFOLD_GOAL = """id: EXAMPLE-001
+objective: Replace this with the outcome you want.
+
+skills:
+  - checkpoint-discipline
+
+tasks:
+  - id: TASK-001
+    objective: Describe one coherent change.
+    # `output` is only read by the mock provider; a real provider decides what
+    # to write. `owned_paths` is enforced for every provider.
+    output: agentic-example/task-001.txt
+    owned_paths:
+      - agentic-example/**
+    checks: []
+
+limits:
+  repair_attempts: 2
+  budget_usd: 1
+"""
+
+SCAFFOLD_IGNORE = ".agentic/"
+
+
+def command_init(args: argparse.Namespace) -> int:
+    root = Path.cwd().resolve()
+    toplevel = run_command(
+        ["git", "rev-parse", "--show-toplevel"], cwd=root, check=False
+    )
+    if toplevel.returncode != 0:
+        raise ValidationError(f"Not a Git repository: {root}")
+    if Path(toplevel.stdout.strip()).resolve() != root:
+        raise ValidationError(
+            "Run agentic init at the Git repository root: "
+            f"{Path(toplevel.stdout.strip()).resolve()}"
+        )
+
+    created: list[str] = []
+    skipped: list[str] = []
+    for relative, content in (
+        ("agentic.yaml", SCAFFOLD_CONFIG),
+        ("goals/example.yaml", SCAFFOLD_GOAL),
+    ):
+        target = root / relative
+        if target.exists() and not args.force:
+            skipped.append(relative)
+            continue
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_text(content, encoding="utf-8")
+        created.append(relative)
+
+    gitignore = root / ".gitignore"
+    existing = (
+        gitignore.read_text(encoding="utf-8") if gitignore.is_file() else ""
+    )
+    if SCAFFOLD_IGNORE in {line.strip() for line in existing.splitlines()}:
+        skipped.append(".gitignore")
+    else:
+        separator = "" if not existing or existing.endswith("\n") else "\n"
+        gitignore.write_text(
+            f"{existing}{separator}{SCAFFOLD_IGNORE}\n", encoding="utf-8"
+        )
+        created.append(".gitignore")
+
+    validate_config(load_yaml(root / "agentic.yaml"))
+    errors = validate_goal(load_yaml(root / "goals/example.yaml"))
+    if errors:
+        raise ValidationError("Scaffolded goal is invalid: " + "; ".join(errors))
+
+    for relative in created:
+        print(f"created: {relative}")
+    for relative in skipped:
+        print(f"kept: {relative}")
+    if not created:
+        print("Already initialized; nothing to write.")
+        return 0
+    print("\nNext steps:")
+    print("  agentic doctor")
+    print("  agentic worktree create ui --branch task/ui --model default")
+    print("  agentic goal validate goals/example.yaml")
+    return 0
+
+
 def find_project_root(start: Path | None = None) -> Path:
     current = (start or Path.cwd()).resolve()
     for candidate in (current, *current.parents):
@@ -501,6 +632,14 @@ def command_version(_: argparse.Namespace) -> int:
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog="agentic", description="Ortak Agentic OS")
     subparsers = parser.add_subparsers(dest="command", required=True)
+
+    init = subparsers.add_parser(
+        "init", help="Scaffold agentic.yaml, goals/, and .gitignore in this repository"
+    )
+    init.add_argument(
+        "--force", action="store_true", help="Overwrite existing scaffold files"
+    )
+    init.set_defaults(handler=command_init)
 
     doctor = subparsers.add_parser("doctor", help="Validate the local setup")
     doctor.set_defaults(handler=command_doctor)
