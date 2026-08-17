@@ -56,7 +56,7 @@ def run_mock_goal(goal: dict, state: StateStore) -> str:
     return run_id
 
 
-class _LeaseHeartbeat:
+class LeaseHeartbeat:
     """Keep a worktree lease alive for as long as this process is working.
 
     A task may run far longer than the lease TTL, so renewing only at task
@@ -77,7 +77,7 @@ class _LeaseHeartbeat:
         self._stop = threading.Event()
         self._thread: threading.Thread | None = None
 
-    def __enter__(self) -> _LeaseHeartbeat:
+    def __enter__(self) -> LeaseHeartbeat:
         self._thread = threading.Thread(
             target=self._renew_until_stopped,
             name=f"lease-heartbeat-{self.worktree_name}",
@@ -219,7 +219,7 @@ class GoalRunner:
         self.state.update_worktree(worktree["name"], status="RUNNING", mode="goal")
 
         try:
-            with _LeaseHeartbeat(self.state, worktree["name"], run_id, lease_ttl):
+            with LeaseHeartbeat(self.state, worktree["name"], run_id, lease_ttl):
                 for task_row in self.state.list_tasks(run_id):
                     if task_row["status"] == "COMPLETED":
                         continue

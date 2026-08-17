@@ -134,7 +134,7 @@ class WorkflowTests(unittest.TestCase):
         self.assertIn("review.passed", event_types)
         self.assertIn("verification.passed", event_types)
 
-        integration_path, integration_head = self.git.create_integration(
+        integration_path, integration_head, _ = self.git.create_integration(
             integration_root=self.root / ".agentic/integrations",
             integration_branch="integration/goal-1",
             base_sha=run["base_sha"],
@@ -652,13 +652,13 @@ class WorkflowTests(unittest.TestCase):
 
         run_ids = [runner.start(record) for record in records]
         integration_root = self.root / ".agentic/integrations"
-        integration_path, _ = self.git.create_integration(
+        integration_path, _, _ = self.git.create_integration(
             integration_root=integration_root,
             integration_branch="integration/sprint-1",
             base_sha=self.state.get_run(run_ids[0])["base_sha"],
             source_branch=first_worktree["branch"],
         )
-        reused_path, _ = self.git.create_integration(
+        reused_path, _, _ = self.git.create_integration(
             integration_root=integration_root,
             integration_branch="integration/sprint-1",
             base_sha=self.state.get_run(run_ids[1])["base_sha"],
@@ -679,14 +679,16 @@ class WorkflowTests(unittest.TestCase):
             self.git.commit_checkpoint(path, f"fixture: {worktree['name']}")
         main_before = self.git.head(self.root)
         integration_root = self.root / ".agentic/integrations"
-        integration_path, _ = self.git.create_integration(
+        integration_path, _, _ = self.git.create_integration(
             integration_root=integration_root,
             integration_branch="integration/conflict",
             base_sha=main_before,
             source_branch=first["branch"],
         )
 
-        with self.assertRaisesRegex(GitError, "CONFLICT"):
+        head_before_conflict = self.git.head(integration_path)
+
+        with self.assertRaisesRegex(GitError, "Merge failed"):
             self.git.create_integration(
                 integration_root=integration_root,
                 integration_branch="integration/conflict",
@@ -694,8 +696,23 @@ class WorkflowTests(unittest.TestCase):
                 source_branch=second["branch"],
             )
 
-        self.assertFalse(self.git.is_clean(integration_path))
+        # The conflict is rolled back, so the sprint branch stays usable for
+        # the goals that follow instead of needing manual cleanup.
+        self.assertTrue(self.git.is_clean(integration_path))
+        self.assertEqual(self.git.head(integration_path), head_before_conflict)
         self.assertEqual(self.git.head(self.root), main_before)
+
+        third = self.create_managed_worktree("conflict-three")
+        third_path = Path(third["path"])
+        (third_path / "unrelated.txt").write_text("ok\n", encoding="utf-8")
+        self.git.commit_checkpoint(third_path, "fixture: unrelated change")
+        reused, _, _ = self.git.create_integration(
+            integration_root=integration_root,
+            integration_branch="integration/conflict",
+            base_sha=main_before,
+            source_branch=third["branch"],
+        )
+        self.assertTrue((reused / "unrelated.txt").is_file())
 
     def test_external_goal_dependency_blocks_until_ready(self) -> None:
         self.create_managed_worktree("database")
