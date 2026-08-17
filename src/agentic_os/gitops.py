@@ -108,6 +108,18 @@ class GitOperations:
         run_command(["git", "commit", "-m", message], cwd=cwd)
         return self.head(cwd), paths
 
+    def reset_hard(self, cwd: Path, sha: str) -> None:
+        run_command(["git", "reset", "--hard", sha], cwd=cwd)
+
+    def discard_changes(self, cwd: Path) -> list[str]:
+        """Throw away everything not committed. Returns what was discarded."""
+        discarded = self.status_paths(cwd)
+        if not discarded:
+            return []
+        run_command(["git", "reset", "--hard", "HEAD"], cwd=cwd)
+        run_command(["git", "clean", "-fd"], cwd=cwd)
+        return discarded
+
     def changed_since(self, cwd: Path, base_sha: str) -> list[str]:
         output = run_command(
             ["git", "diff", "--name-only", f"{base_sha}..HEAD"], cwd=cwd
@@ -121,7 +133,7 @@ class GitOperations:
         integration_branch: str,
         base_sha: str,
         source_branch: str,
-    ) -> tuple[Path, str]:
+    ) -> tuple[Path, str, str]:
         if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._/-]{0,127}", integration_branch):
             raise GitError("Invalid integration branch name")
         path = integration_root / integration_branch.replace("/", "-")
@@ -157,7 +169,17 @@ class GitOperations:
                     ],
                     cwd=self.root,
                 )
-        run_command(
-            ["git", "merge", "--no-ff", "--no-edit", source_branch], cwd=path
+        before_merge = self.head(path)
+        merge = run_command(
+            ["git", "merge", "--no-ff", "--no-edit", source_branch],
+            cwd=path,
+            check=False,
         )
-        return path, self.head(path)
+        if merge.returncode != 0:
+            # Leave the integration worktree usable: an abandoned conflict would
+            # block every later goal that targets this sprint branch.
+            run_command(["git", "merge", "--abort"], cwd=path, check=False)
+            self.reset_hard(path, before_merge)
+            detail = merge.stdout.strip() or merge.stderr.strip()
+            raise GitError(f"Merge failed ({source_branch} into {integration_branch}): {detail}")
+        return path, self.head(path), before_merge

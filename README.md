@@ -103,6 +103,8 @@ böylece aynı hatayı tekrarlamak yerine gerçekten onarabilir.
 
 - Worktree ve model seçimini kullanıcı yapar.
 - `chat` yalnızca etkileşimli oturum açar; otonom çalışmayı başlatmaz.
+- `chat` oturum boyunca worktree lease'ini tutar: insan da bir yazıcıdır, bu
+  yüzden oturum açıkken aynı worktree'ye başka hiçbir şey yazamaz.
 - Onaylanan goal içeriği digest ve sürümle dondurulur.
 - Bir worktree'de aynı anda yalnızca bir yazıcı lease alabilir.
 - Task ancak review ve kontroller geçince checkpoint commit'i olur.
@@ -115,6 +117,12 @@ böylece aynı hatayı tekrarlamak yerine gerçekten onarabilir.
 - Watcher aynı commit'i tekrar test etmez ve kod yazmaz.
 - Bir sprintin feature dalları aynı integration worktree'sine ardışık alınabilir.
 - Merge conflict veya birleşik test hatası goal'ı durdurur; runtime doğrudan `main`e yazmaz.
+- Başarısız bir integration geri alınır: merge, birleşme öncesi commit'e
+  sıfırlanır. Sprint dalı zehirlenmez, sıradaki goal temiz bir taban üzerine
+  merge eder ve elle temizlik gerekmez.
+- Hiçbir arıza çıkmaz sokak değildir: `goal retry` başarısız bir run'ın
+  task'larını yeniden açıp kaldığı yerden sürdürür, bloke olmuş bir
+  integration'ı yeniden denenebilir hale getirir.
 - Provider'ın branch değiştirmesi veya runtime dışında commit üretmesi algılanıp goal bloke edilir.
 - Kirli worktree sessizce silinmez; dal kaldırma sonrasında korunur.
 
@@ -124,7 +132,12 @@ böylece aynı hatayı tekrarlamak yerine gerçekten onarabilir.
 uv run python -W error::ResourceWarning -m unittest discover -s tests -v
 uv run agentic events
 uv run agentic recover
+uv run agentic goal retry GOAL-ID [--discard]
 ```
+
+`recover` yarım kalmış süreçleri toplar; `retry` ise gerçekten başarısız olmuş
+bir goal'ı yeniden açar. Başarısız deneme worktree'de commit'lenmemiş kalıntı
+bıraktıysa `retry` bunu sessizce ezmez, `--discard` ister.
 
 `watch --duration 3600 --interval 30` hafif bir test ajanını belirli süre
 çalıştırır. Yarım kalan süreçlerin lease süresi dolduğunda `recover`, koşuyu

@@ -3,6 +3,7 @@ from __future__ import annotations
 import subprocess
 import sys
 import tempfile
+import time
 import unittest
 from pathlib import Path
 
@@ -263,6 +264,220 @@ tasks:
             self.assertIn("Git repository root", result.stderr)
             self.assertFalse((nested / "agentic.yaml").exists())
             self.assertFalse((root / "agentic.yaml").exists())
+
+    def scaffolded_project(self, directory: str) -> Path:
+        root = Path(directory)
+        self.run_cmd(["git", "init", "-b", "main"], root)
+        self.run_cmd(["git", "config", "user.name", "Agentic Test"], root)
+        self.run_cmd(["git", "config", "user.email", "agentic@example.test"], root)
+        self.cli(["init"], root)
+        self.run_cmd(["git", "add", "-A"], root)
+        self.run_cmd(["git", "commit", "-m", "scaffold"], root)
+        return root
+
+    def lease_of(self, worktree: str, root: Path) -> str:
+        for line in self.cli(["worktree", "inspect", worktree], root).splitlines():
+            if line.startswith("lease: "):
+                return line.removeprefix("lease: ")
+        self.fail("worktree inspect did not report a lease")
+
+    def test_chat_holds_the_worktree_lease_for_its_duration(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = self.scaffolded_project(directory)
+            config = root / "agentic.yaml"
+            config.write_text(
+                config.read_text(encoding="utf-8").replace(
+                    "    model: deterministic-worker\n",
+                    "    model: deterministic-worker\n"
+                    f'    interactive_command: ["{sys.executable}", "-c", '
+                    '"import time; time.sleep(3)"]\n',
+                ),
+                encoding="utf-8",
+            )
+            self.run_cmd(["git", "add", "-A"], root)
+            self.run_cmd(["git", "commit", "-m", "interactive profile"], root)
+            self.cli(
+                ["worktree", "create", "ui", "--branch", "task/ui", "--model", "default"],
+                root,
+            )
+            self.assertEqual(self.lease_of("ui", root), "none")
+
+            with subprocess.Popen(
+                [sys.executable, "-m", "agentic_os", "chat", "ui"],
+                cwd=root,
+                text=True,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+            ) as session:
+                held = ""
+                deadline = time.monotonic() + 10
+                while time.monotonic() < deadline:
+                    held = self.lease_of("ui", root)
+                    if held != "none":
+                        break
+                    time.sleep(0.05)
+                self.assertTrue(
+                    held.startswith("CHAT-"), f"expected a chat lease, got {held!r}"
+                )
+                # The session owns the worktree: nothing else may write to it.
+                self.assertEqual(
+                    self.lease_of("ui", root), held, "lease changed mid-session"
+                )
+                session.wait(timeout=30)
+
+            self.assertEqual(session.returncode, 0)
+            self.assertEqual(self.lease_of("ui", root), "none")
+            events = self.cli(["events", "--limit", "50"], root)
+            self.assertIn("chat.opened", events)
+            self.assertIn("chat.closed", events)
+
+    def flaky_agent_project(self, directory: str) -> tuple[Path, Path]:
+        """A project whose agent CLI fails until a marker file appears."""
+        root = self.scaffolded_project(directory)
+        marker = root / ".agentic" / "dependency-ready"
+        (root / "fake_agent.py").write_text(
+            "import pathlib, sys\n"
+            "sys.stdin.read()\n"
+            "pathlib.Path('generated').mkdir(exist_ok=True)\n"
+            "pathlib.Path('generated/partial.txt').write_text('half done\\n')\n"
+            "if not pathlib.Path(sys.argv[1]).exists():\n"
+            "    sys.stderr.write('dependency missing\\n')\n"
+            "    sys.exit(1)\n"
+            "pathlib.Path('generated/out.txt').write_text('done\\n')\n",
+            encoding="utf-8",
+        )
+        config = root / "agentic.yaml"
+        config.write_text(
+            config.read_text(encoding="utf-8").replace(
+                "  default:\n    provider: mock\n    model: deterministic-worker\n",
+                "  default:\n"
+                "    provider: command\n"
+                "    model: fixture\n"
+                f'    command: ["{sys.executable}", "fake_agent.py", "{marker}"]\n',
+            ),
+            encoding="utf-8",
+        )
+        (root / "goals" / "example.yaml").write_text(
+            "id: FLAKY-001\n"
+            "objective: Survive a failure and be retried.\n"
+            "tasks:\n"
+            "  - id: TASK-001\n"
+            "    objective: Produce the artifact.\n"
+            "    owned_paths:\n"
+            "      - generated/**\n"
+            "limits:\n"
+            "  repair_attempts: 0\n",
+            encoding="utf-8",
+        )
+        self.run_cmd(["git", "add", "-A"], root)
+        self.run_cmd(["git", "commit", "-m", "flaky agent"], root)
+        return root, marker
+
+    def test_retry_reopens_a_failed_run(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root, marker = self.flaky_agent_project(directory)
+            self.cli(
+                ["worktree", "create", "ui", "--branch", "task/ui", "--model", "default"],
+                root,
+            )
+            self.cli(["goal", "approve", "goals/example.yaml", "--worktree", "ui"], root)
+            self.cli(["goal", "arm", "FLAKY-001"], root)
+
+            failed = subprocess.run(
+                [sys.executable, "-m", "agentic_os", "goal", "run", "FLAKY-001"],
+                cwd=root,
+                text=True,
+                capture_output=True,
+                check=False,
+            )
+            self.assertEqual(failed.returncode, 1)
+            status = self.cli(["goal", "status", "FLAKY-001"], root)
+            self.assertIn("Status: BLOCKED", status)
+            self.assertIn("TASK-001  FAILED", status)
+
+            # The failed attempt left half-written output behind, so a retry
+            # must refuse until it is told what to do with it.
+            refused = subprocess.run(
+                [sys.executable, "-m", "agentic_os", "goal", "retry", "FLAKY-001"],
+                cwd=root,
+                text=True,
+                capture_output=True,
+                check=False,
+            )
+            self.assertEqual(refused.returncode, 1)
+            self.assertIn("--discard", refused.stderr)
+
+            marker.parent.mkdir(parents=True, exist_ok=True)
+            marker.write_text("ready\n", encoding="utf-8")
+            retried = self.cli(["goal", "retry", "FLAKY-001", "--discard"], root)
+            self.assertIn("Reopened tasks: TASK-001", retried)
+            self.assertIn("Status: READY_FOR_INTEGRATION", retried)
+            self.assertIn(
+                "Status: READY_FOR_INTEGRATION",
+                self.cli(["goal", "status", "FLAKY-001"], root),
+            )
+
+    def test_failed_integration_rolls_back_and_can_be_retried(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = self.scaffolded_project(directory)
+            gate = root / ".agentic" / "integration-ready"
+            (root / "goals" / "example.yaml").write_text(
+                "id: GATED-001\n"
+                "objective: Fail integration checks, then pass them.\n"
+                "tasks:\n"
+                "  - id: TASK-001\n"
+                "    objective: Produce the artifact.\n"
+                "    output: generated/out.txt\n"
+                "    owned_paths:\n"
+                "      - generated/**\n"
+                "integration_checks:\n"
+                f'  - ["{sys.executable}", "-c", '
+                f'"import pathlib,sys; sys.exit(0 if pathlib.Path(r\'{gate}\').exists() else 1)"]\n',
+                encoding="utf-8",
+            )
+            self.run_cmd(["git", "add", "-A"], root)
+            self.run_cmd(["git", "commit", "-m", "gated goal"], root)
+            self.cli(
+                ["worktree", "create", "ui", "--branch", "task/ui", "--model", "default"],
+                root,
+            )
+            self.cli(["goal", "approve", "goals/example.yaml", "--worktree", "ui"], root)
+            self.cli(["goal", "arm", "GATED-001"], root)
+            self.cli(["goal", "run", "GATED-001"], root)
+
+            integration = root / ".agentic/integrations/integration-sprint-1"
+            failed = subprocess.run(
+                [
+                    sys.executable, "-m", "agentic_os", "goal", "integrate",
+                    "GATED-001", "--branch", "integration/sprint-1",
+                ],
+                cwd=root,
+                text=True,
+                capture_output=True,
+                check=False,
+            )
+            self.assertEqual(failed.returncode, 1)
+            self.assertIn("rolled back", failed.stderr)
+            self.assertIn("Status: BLOCKED", self.cli(["goal", "status", "GATED-001"], root))
+            # The merge is gone, so the sprint branch is not poisoned.
+            self.assertFalse((integration / "generated/out.txt").exists())
+            self.assertEqual(
+                self.output(["git", "status", "--porcelain"], integration), ""
+            )
+
+            gate.parent.mkdir(parents=True, exist_ok=True)
+            gate.write_text("ready\n", encoding="utf-8")
+            reopened = self.cli(["goal", "retry", "GATED-001"], root)
+            self.assertIn("Goal reopened", reopened)
+            integrated = self.cli(
+                [
+                    "goal", "integrate", "GATED-001",
+                    "--branch", "integration/sprint-1",
+                ],
+                root,
+            )
+            self.assertIn("Main branch was not modified.", integrated)
+            self.assertTrue((integration / "generated/out.txt").is_file())
 
     def cli(self, args: list[str], cwd: Path) -> str:
         return self.output([sys.executable, "-m", "agentic_os", *args], cwd)

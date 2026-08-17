@@ -6,6 +6,7 @@ import sqlite3
 import subprocess
 import sys
 from pathlib import Path
+from uuid import uuid4
 
 from agentic_os import __version__
 from agentic_os.core import (
@@ -15,7 +16,7 @@ from agentic_os.core import (
     validate_config,
     validate_goal,
 )
-from agentic_os.engine import GoalRunner, RunnerError, run_mock_goal
+from agentic_os.engine import GoalRunner, LeaseHeartbeat, RunnerError, run_mock_goal
 from agentic_os.gitops import GitError, GitOperations, run_command
 from agentic_os.state import StateStore
 from agentic_os.watcher import VerificationWatcher
@@ -381,7 +382,26 @@ def command_chat(args: argparse.Namespace) -> int:
         isinstance(part, str) and part for part in command
     ):
         raise ValidationError("interactive_command must be a non-empty string array")
-    result = subprocess.run(command, cwd=worktree["path"], check=False)
+
+    # A human editing a worktree is a writer like any other, so the session
+    # holds the lease for its whole duration instead of merely checking it.
+    holder = f"CHAT-{uuid4().hex[:10].upper()}"
+    lease_ttl = int(
+        config.get("loops", {}).get("default", {}).get("lease_ttl_seconds", 300)
+    )
+    state.acquire_lease(args.worktree, holder, ttl_seconds=lease_ttl)
+    state.append_event(
+        "chat.opened",
+        payload={"worktree": args.worktree, "holder": holder, "model": worktree["model"]},
+    )
+    try:
+        with LeaseHeartbeat(state, args.worktree, holder, lease_ttl):
+            result = subprocess.run(command, cwd=worktree["path"], check=False)
+    finally:
+        state.release_lease(args.worktree, holder)
+        state.append_event(
+            "chat.closed", payload={"worktree": args.worktree, "holder": holder}
+        )
     return result.returncode
 
 
@@ -505,6 +525,77 @@ def command_goal_stop(args: argparse.Namespace) -> int:
     return 0
 
 
+def command_goal_retry(args: argparse.Namespace) -> int:
+    """Reopen a goal that failed, which is otherwise a dead end."""
+    root, config, state, git = project_context()
+    goal = _require_goal(state, args.goal, None)
+    run = state.latest_run_for_goal(goal["goal_id"])
+    if not run:
+        raise ValidationError(f"No run to retry for goal {goal['goal_id']}")
+
+    # An integration that failed its checks leaves the run intact; only the
+    # goal was blocked, so reopening it is enough to run integrate again.
+    if run["status"] == "READY_FOR_INTEGRATION" and goal["status"] == "BLOCKED":
+        state.set_goal_status(goal["goal_id"], goal["version"], "READY_FOR_INTEGRATION")
+        state.append_event(
+            "goal.retry",
+            goal_id=goal["goal_id"],
+            run_id=run["id"],
+            payload={"from": "integration"},
+        )
+        print(f"Goal reopened: {goal['goal_id']}@{goal['version']}")
+        print("Retry with: agentic goal integrate " + goal["goal_id"])
+        return 0
+
+    if run["status"] != "FAILED":
+        raise ValidationError(
+            f"Run {run['id']} is {run['status']}; only a FAILED run can be retried"
+        )
+
+    worktree = _require_worktree(state, run["worktree_name"])
+    path = Path(worktree["path"])
+    if args.discard:
+        discarded = git.discard_changes(path)
+        if discarded:
+            state.append_event(
+                "worktree.discarded",
+                goal_id=goal["goal_id"],
+                run_id=run["id"],
+                payload={"worktree": worktree["name"], "paths": discarded},
+            )
+            print(f"Discarded {len(discarded)} uncommitted path(s)")
+    if not git.is_clean(path):
+        raise ValidationError(
+            "Worktree has uncommitted changes from the failed attempt; "
+            "commit them or rerun with --discard"
+        )
+
+    reopened = [
+        task["task_id"]
+        for task in state.list_tasks(run["id"])
+        if task["status"] in {"FAILED", "RUNNING"}
+    ]
+    for task_id in reopened:
+        state.update_task(run["id"], task_id, status="PENDING", attempts=0)
+    state.set_run_status(run["id"], "PAUSED", "reopened by retry")
+    state.set_goal_status(goal["goal_id"], goal["version"], "PAUSED")
+    state.update_worktree(worktree["name"], status="PAUSED")
+    state.append_event(
+        "goal.retry",
+        goal_id=goal["goal_id"],
+        run_id=run["id"],
+        payload={"from": "failed_run", "tasks": reopened},
+    )
+    print(f"Reopened tasks: {', '.join(reopened) or 'none'}")
+
+    runner = GoalRunner(root=root, config=config, state=state, git=git)
+    runner.resume(run["id"])
+    updated = state.get_run(run["id"])
+    print(f"Run: {run['id']}")
+    print(f"Status: {updated['status']}")
+    return 0
+
+
 def command_goal_status(args: argparse.Namespace) -> int:
     _, _, state, _ = project_context()
     goal = _require_goal(state, args.goal, args.version)
@@ -539,7 +630,7 @@ def command_goal_integrate(args: argparse.Namespace) -> int:
     integration_root = root / config["runtime"].get(
         "integrations", ".agentic/integrations"
     )
-    path, head = git.create_integration(
+    path, head, before_merge = git.create_integration(
         integration_root=integration_root,
         integration_branch=branch,
         base_sha=run["base_sha"],
@@ -553,13 +644,21 @@ def command_goal_integrate(args: argparse.Namespace) -> int:
         for command in checks:
             run_command(command, cwd=path, timeout=600)
     except Exception as exc:
+        # Roll the merge back. Leaving it in place would make every later goal
+        # in this sprint merge on top of a branch known to fail its checks.
+        git.reset_hard(path, before_merge)
         state.set_goal_status(goal["goal_id"], goal["version"], "BLOCKED")
         state.append_event(
             "integration.failed",
             goal_id=goal["goal_id"],
             run_id=run["id"],
-            payload={"branch": branch, "error": str(exc)},
+            payload={
+                "branch": branch,
+                "error": str(exc),
+                "rolled_back_to": before_merge,
+            },
         )
+        print(f"Integration rolled back to {before_merge}", file=sys.stderr)
         raise
     state.set_goal_status(goal["goal_id"], goal["version"], "INTEGRATED")
     state.set_run_status(run["id"], "INTEGRATED")
@@ -740,6 +839,14 @@ def build_parser() -> argparse.ArgumentParser:
     stop = goal_sub.add_parser("stop")
     stop.add_argument("goal")
     stop.set_defaults(handler=command_goal_stop)
+    retry = goal_sub.add_parser("retry", help="Reopen a failed or blocked goal")
+    retry.add_argument("goal")
+    retry.add_argument(
+        "--discard",
+        action="store_true",
+        help="Throw away uncommitted changes left by the failed attempt",
+    )
+    retry.set_defaults(handler=command_goal_retry)
     goal_status = goal_sub.add_parser("status")
     goal_status.add_argument("goal")
     goal_status.add_argument("--version", type=int)
