@@ -40,6 +40,25 @@ uv run agentic goal integrate OTHER-001 --branch integration/sprint-1
 
 `main` dalına son birleşim bilinçli olarak kullanıcıya bırakılır.
 
+## Başka bir projede kullanmak
+
+Runtime, içinde çalıştığı Git reposunu yönetir; bu repoyu klonlamak yerine paket
+olarak kurup kendi projene bağlarsın:
+
+```bash
+uv add git+https://github.com/yyuzuak/ortak-agentic-os
+uv run agentic init
+uv run agentic doctor
+```
+
+`init` git kökünde `agentic.yaml` ve `goals/example.yaml` oluşturur, `.agentic/`
+satırını `.gitignore`'a ekler. Mevcut dosyaları ezmez ve `.gitignore`'u
+değiştirmek yerine ona ekler; tekrar çalıştırmak güvenlidir (`--force` ezer).
+Git kökü dışında çalıştırılırsa reddeder.
+
+Sonrası aynı: `agentic.yaml` içindeki model profilini kendi ajan CLI'ına
+bağlarsın, goal'larını `goals/` altına yazarsın.
+
 ## Sürüm katmanları
 
 | Katman | Hazır yetenekler |
